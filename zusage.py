@@ -357,12 +357,9 @@ def print_weekly_usage(usage_data, days=7):
     if max_usage == 0:
         max_usage = 1
 
-    print(f"{Colors.OKBLUE}{Colors.BOLD}📅 最近 {days} 天消耗:{Colors.ENDC}")
-
+    # 生成所有标签并找出最大宽度
+    labels = []
     for i, (date_str, date) in enumerate(date_list):
-        usage = daily.get(date_str, 0)
-
-        # 生成日期标签
         if i == 0:
             label = f"{date_str} (今天)"
         elif i == 1:
@@ -370,6 +367,16 @@ def print_weekly_usage(usage_data, days=7):
         else:
             weekday = date.strftime('%a')
             label = f"{date_str} ({weekday})"
+        labels.append(label)
+
+    max_label_width = max(get_display_width(label) for label in labels) if labels else 0
+
+    print(f"{Colors.OKBLUE}{Colors.BOLD}📅 最近 {days} 天消耗:{Colors.ENDC}")
+
+    for i, (date_str, date) in enumerate(date_list):
+        usage = daily.get(date_str, 0)
+
+        label = labels[i]
 
         # 创建进度条（相对最大值）
         if max_usage > 0:
@@ -382,10 +389,101 @@ def print_weekly_usage(usage_data, days=7):
         # 格式化使用量（带千位分隔符）
         usage_str = format_number(usage)
 
-        # 计算需要的空格数来对齐（目标宽度24）
+        # 计算需要的空格数来对齐（使用最大标签宽度）
         label_width = get_display_width(label)
-        padding = 24 - label_width
-        padding_str = ' ' * max(0, padding)
+        padding = max_label_width - label_width
+        padding_str = ' ' * padding
+
+        print(f"  {label}{padding_str} {progress_bar} {usage_str}")
+    print()
+
+
+def aggregate_hourly_usage(data, hours=8):
+    """聚合最近 N 小时的使用数据"""
+    if not data or not data.get('success'):
+        return None
+
+    try:
+        x_times = data.get('data', {}).get('x_time', [])
+        tokens_usage = data.get('data', {}).get('tokensUsage', [])
+
+        # 获取当前时间（本地时间）
+        now = datetime.now()
+
+        # 按小时聚合
+        hourly_totals = {}
+        for i, time_str in enumerate(x_times):
+            # 解析时间字符串 "YYYY-MM-DD HH:MM"
+            dt = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
+            token_value = tokens_usage[i]
+
+            if token_value is not None:
+                # 只保留最近 N 小时的数据
+                time_diff = (now - dt).total_seconds() / 3600  # 转换为小时
+                if time_diff <= hours:
+                    hour_key = dt.strftime('%Y-%m-%d %H:00')
+                    if hour_key not in hourly_totals:
+                        hourly_totals[hour_key] = 0
+                    hourly_totals[hour_key] += token_value
+
+        return hourly_totals
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def print_hourly_usage(hourly_data, hours=8):
+    """打印最近 N 小时的使用情况"""
+    if not hourly_data:
+        return
+
+    # 找出最大值用于进度条比例
+    max_usage = max(hourly_data.values()) if hourly_data else 1
+    if max_usage == 0:
+        max_usage = 1
+
+    print(f"{Colors.OKBLUE}{Colors.BOLD}⏰ 最近 {hours} 小时消耗:{Colors.ENDC}")
+
+    # 生成最近 N 小时的列表（倒序）
+    now = datetime.now()
+    hour_list = []
+    for i in range(hours):
+        hour_time = now - timedelta(hours=i)
+        hour_key = hour_time.strftime('%Y-%m-%d %H:00')
+        hour_list.append((hour_key, hour_time))
+
+    # 生成所有标签并找出最大宽度
+    labels = []
+    for idx, (hour_key, hour_time) in enumerate(hour_list):
+        if idx == 0:
+            label = f"{hour_key} (现在)"
+        elif idx == 1:
+            label = f"{hour_key} (1小时前)"
+        else:
+            label = hour_key
+        labels.append(label)
+
+    max_label_width = max(get_display_width(label) for label in labels) if labels else 0
+
+    for idx, (hour_key, hour_time) in enumerate(hour_list):
+        usage = hourly_data.get(hour_key, 0)
+
+        label = labels[idx]
+
+        # 创建进度条（相对最大值）
+        if max_usage > 0:
+            bar_width = int(30 * usage / max_usage)
+        else:
+            bar_width = 0
+
+        progress_bar = Colors.OKGREEN + '█' * bar_width + Colors.GRAY_BAR + '░' * (30 - bar_width) + Colors.ENDC
+
+        # 格式化使用量（带千位分隔符）
+        usage_str = format_number(usage)
+
+        # 计算需要的空格数来对齐（使用最大标签宽度）
+        label_width = get_display_width(label)
+        padding = max_label_width - label_width
+        padding_str = ' ' * padding
 
         print(f"  {label}{padding_str} {progress_bar} {usage_str}")
     print()
@@ -399,6 +497,10 @@ def main():
                         help='显示最近 7 天的 token 消耗详情')
     parser.add_argument('-d', '--days', type=int, default=7,
                         help='显示最近 N 天的消耗数据（默认: 7）')
+    parser.add_argument('-H', '--show-hourly', action='store_true',
+                        help='显示最近 8 小时的 token 消耗详情')
+    parser.add_argument('--hours', type=int, default=8,
+                        help='显示最近 N 小时的消耗数据（默认: 8）')
     args = parser.parse_args()
 
     # 打印标题
@@ -425,23 +527,42 @@ def main():
     usage_details = extract_usage_details(data)
     print_service_usage(usage_details)
 
-    # 获取使用统计数据（最近 N 天）
-    days_to_fetch = args.days
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days_to_fetch - 1)
+    # 只有在指定了显示选项时才获取使用统计数据
+    if args.show_weekly or args.show_hourly:
+        # 获取使用统计数据（最近 N 天）
+        days_to_fetch = args.days
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_to_fetch - 1)
 
-    start_time_str = start_date.strftime('%Y-%m-%d') + ' 00:00:00'
-    end_time_str = end_date.strftime('%Y-%m-%d') + ' 23:59:59'
+        start_time_str = start_date.strftime('%Y-%m-%d') + ' 00:00:00'
+        end_time_str = end_date.strftime('%Y-%m-%d') + ' 23:59:59'
 
-    usage_data_response = fetch_usage_data(token, start_time_str, end_time_str)
-    aggregated_usage = aggregate_daily_usage(usage_data_response)
+        usage_data_response = fetch_usage_data(token, start_time_str, end_time_str)
+        aggregated_usage = aggregate_daily_usage(usage_data_response)
 
-    # 显示今日和总计
-    print_daily_usage_summary(aggregated_usage)
+        # 显示今日和总计（仅当显示周视图时）
+        if args.show_weekly:
+            print_daily_usage_summary(aggregated_usage)
 
-    # 如果指定了 --show-weekly，显示最近 N 天详情
-    if args.show_weekly and aggregated_usage:
-        print_weekly_usage(aggregated_usage, days=args.days)
+        # 如果指定了 --show-weekly，显示最近 N 天详情
+        if args.show_weekly and aggregated_usage:
+            print_weekly_usage(aggregated_usage, days=args.days)
+
+    # 如果指定了 --show-hourly，显示最近 N 小时详情
+    if args.show_hourly:
+        # 获取小时级别的数据（最近24小时以覆盖请求的小时数）
+        hours_to_fetch = max(args.hours, 24)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(hours=hours_to_fetch)
+
+        start_time_str = start_date.strftime('%Y-%m-%d %H:%M:%S')
+        end_time_str = end_date.strftime('%Y-%m-%d %H:%M:%S')
+
+        hourly_data_response = fetch_usage_data(token, start_time_str, end_time_str)
+        aggregated_hourly = aggregate_hourly_usage(hourly_data_response, hours=args.hours)
+
+        if aggregated_hourly:
+            print_hourly_usage(aggregated_hourly, hours=args.hours)
 
     # 打印底部
     print_footer()
